@@ -1,0 +1,234 @@
+import ftplib
+import os
+import posixpath
+import json
+from datetime import datetime
+from urllib.parse import urlparse
+
+
+def parse_ftp_url(url):
+    p = urlparse(url)
+    scheme = p.scheme.lower()
+    host = p.hostname
+    port = p.port or 21
+    base_path = p.path or '/'
+    if not base_path.startswith('/'):
+        base_path = '/' + base_path
+    return scheme, host, port, base_path
+
+
+def connect(scheme, host, port=21, username=None, password=None, timeout=30):
+    if scheme == 'ftps':
+        ftp = ftplib.FTP_TLS()
+    else:
+        ftp = ftplib.FTP()
+
+    ftp.connect(host, port, timeout=timeout)
+    ftp.login(username or 'anonymous', password or '')
+    ftp.sock.settimeout(timeout)
+    ftp.set_pasv(True)
+
+    if scheme == 'ftps':
+        # Protege a conexão de dados após o login
+        ftp.prot_p()
+
+    return ftp
+
+
+def get_mdtm(ftp, path):
+    try:
+        resp = ftp.sendcmd('MDTM ' + path)
+        if resp.startswith('213 '):
+            timestr = resp[4:].strip()
+            dt = datetime.strptime(timestr, "%Y%m%d%H%M%S")
+            return dt.timestamp()
+    except Exception:
+        return None
+
+
+def get_size(ftp, path):
+    try:
+        return ftp.size(path)
+    except Exception:
+        return None
+
+
+def _is_dir_by_mlsd(facts):
+    t = facts.get('type')
+    return t == 'dir' or t == 'cdir'
+
+
+def list_files(ftp, base_path):
+    files = []
+
+    def _walk(current_path):
+        entries = []
+        try:
+            names = ftp.nlst(current_path)
+            entries = [(name, {}) for name in names]
+        except Exception as nlst_error:
+            try:
+                entries = list(ftp.mlsd(current_path))
+            except Exception as mlsd_error:
+                raise RuntimeError(
+                    f"Falha ao listar {current_path}: NLST={nlst_error}; MLSD={mlsd_error}"
+                ) from mlsd_error
+
+        for name, facts in entries:
+            if name in ('.', '..') or posixpath.basename(name) in ('.', '..'):
+                continue
+            full = name if name.startswith('/') else posixpath.join(current_path, name)
+            is_dir = False
+            if facts:
+                is_dir = _is_dir_by_mlsd(facts)
+            else:
+                try:
+                    ftp.cwd(full)
+                    is_dir = True
+                except Exception:
+                    is_dir = False
+                finally:
+                    try:
+                        ftp.cwd(current_path)
+                    except Exception:
+                        pass
+
+            if is_dir:
+                _walk(full)
+            else:
+                files.append(full)
+
+    _walk(base_path)
+    return files
+
+
+def download_file(ftp, remote_path, local_path):
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    with open(local_path, 'wb') as f:
+        ftp.retrbinary('RETR ' + remote_path, f.write)
+    mtime = get_mdtm(ftp, remote_path)
+    if mtime:
+        try:
+            os.utime(local_path, (mtime, mtime))
+        except Exception:
+            pass
+
+
+def download_tree(ftp_url, local_base, username=None, password=None, forcar=False, somente_faltantes=False, progress_callback=None, baixar=True):
+    scheme, host, port, base_path = parse_ftp_url(ftp_url)
+    ftp = connect(scheme, host, port=port, username=username, password=password)
+    try:
+        files = list_files(ftp, base_path)
+        server_files = {
+            os.path.normcase(os.path.normpath(posixpath.relpath(remote, base_path).replace('/', os.sep)))
+            for remote in files
+        }
+        total = len(files)
+        processed = 0
+        updated = 0
+        changes = []
+
+        for remote in files:
+            # compute relative path
+            rel = posixpath.relpath(remote, base_path)
+            rel = rel.lstrip('./')
+            local_path = os.path.join(local_base, *rel.split('/'))
+
+            server_mtime = get_mdtm(ftp, remote)
+            server_size = get_size(ftp, remote)
+            arquivo_faltante = not os.path.exists(local_path)
+            need_download = arquivo_faltante
+            local_mtime = None
+            local_size = None
+            if not arquivo_faltante:
+                try:
+                    local_mtime = os.path.getmtime(local_path)
+                    local_size = os.path.getsize(local_path)
+                except Exception:
+                    need_download = True
+
+                # Arquivos com o mesmo tamanho e data nao sao regravados.
+                metadados_diferentes = (
+                    server_size is not None and local_size != server_size
+                ) or (
+                    server_mtime is not None and local_mtime != server_mtime
+                )
+                need_download = metadados_diferentes
+
+            if need_download:
+                changes.append({
+                    "action": "add" if arquivo_faltante else "update",
+                    "path": rel,
+                    "size": server_size,
+                    "mtime": server_mtime,
+                })
+
+            if need_download and baixar:
+                download_file(ftp, remote, local_path)
+                updated += 1
+
+            processed += 1
+            if progress_callback:
+                try:
+                    progress_callback(processed, total, rel)
+                except Exception:
+                    pass
+
+        return {
+            "total": total,
+            "processed": processed,
+            "updated": updated,
+            "server_files": server_files,
+            "changes": changes,
+        }
+    finally:
+        try:
+            ftp.quit()
+        except Exception:
+            try:
+                ftp.close()
+            except Exception:
+                pass
+
+
+def obter_versao_remota(ftp_url, nome_arquivo_versao, username=None, password=None):
+    """
+    Faz download do arquivo de versão do servidor FTP e retorna a versão.
+    Útil para verificar se há atualizações disponíveis.
+    
+    Args:
+        ftp_url: URL do servidor FTP (ex: ftp://seusite.com/FTP/Client)
+        nome_arquivo_versao: Nome do arquivo de versão no servidor (ex: version.json)
+        username: Usuário FTP
+        password: Senha FTP
+    
+    Returns:
+        str: A versão encontrada, ou None se não conseguir obter
+    """
+    try:
+        scheme, host, port, base_path = parse_ftp_url(ftp_url)
+        ftp = connect(scheme, host, port=port, username=username, password=password)
+        
+        try:
+            # Caminho completo do arquivo de versão no servidor
+            remote_path = posixpath.join(base_path, nome_arquivo_versao)
+            
+            # Baixa o arquivo para memória
+            from io import BytesIO
+            buffer = BytesIO()
+            ftp.retrbinary(f'RETR {remote_path}', buffer.write)
+            buffer.seek(0)
+            
+            # Parse do JSON
+            dados = json.loads(buffer.read().decode('utf-8'))
+            return dados.get('version')
+        finally:
+            try:
+                ftp.quit()
+            except Exception:
+                try:
+                    ftp.close()
+                except Exception:
+                    pass
+    except Exception:
+        return None
