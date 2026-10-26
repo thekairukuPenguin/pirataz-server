@@ -1,0 +1,864 @@
+import os
+import json
+import shutil
+import subprocess
+import threading
+import time
+import traceback
+import customtkinter as ctk
+import sys
+import re
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+import ftp_client
+
+# --- CONFIGURAÇÕES DE ESTILO ---
+COR_ROXA = "#9900FF"          # Roxo vibrante
+COR_ROXA_HOVER = "#5C0297"    # Efeito hover para botões roxos
+COR_BRANCA = "#FFFFFF"
+JSON_FILE = "usuario.json"
+IMAGEM_FUNDO = "background.png"  # Coloque a imagem da sua captura aqui com este nome
+FUNDO_TRANSPARENTE = "#010203" # "Chroma Key" para o efeito transparente
+BASE_PATH = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+RESOURCE_PATH = getattr(sys, "_MEIPASS", BASE_PATH)
+
+# Caminho do Servidor Local/Nuvem para Atualização
+PASTA_SERVIDOR = r""  # caminho do servidor de arquivos
+PASTA_LOCAL = BASE_PATH
+PASTA_RAIZ_JOGOS_PADRAO = r""
+VERSAO_LOCAL_FILE = "launcher_version.json"  # Arquivo de versão local
+VERSAO_SERVIDOR_FILE = "version.json"  # Nome do arquivo de versão no servidor
+
+
+def carregar_pasta_raiz_jogos():
+    try:
+        if os.path.exists(JSON_FILE):
+            with open(JSON_FILE, "r", encoding="utf-8") as f:
+                pasta_configurada = json.load(f).get("pasta_jogos")
+                if pasta_configurada:
+                    return os.path.abspath(os.path.expandvars(pasta_configurada))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return PASTA_RAIZ_JOGOS_PADRAO
+
+
+def pasta_raiz_jogos_configurada():
+    if not os.path.exists(JSON_FILE):
+        return False
+    try:
+        with open(JSON_FILE, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("pasta_jogos"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+PASTA_RAIZ_JOGOS = carregar_pasta_raiz_jogos()
+
+MAPAS_DAYZ = {
+    "Livonia": {
+        "endereco": "",
+        "porta": "",
+        "mods": "",
+    },
+    "Sakhal": {
+        "endereco": "",
+        "porta": "",
+        "mods": "",
+    },
+    "Nasdara": {
+        "endereco": "",
+        "porta": "",
+        "mods": "",
+    },
+}
+
+JOGOS = [
+    {
+        "id": "dayz",
+        "nome": "DAYZ",
+        "servidor": f"{PASTA_SERVIDOR}/DayZ",
+        "pasta_local": os.path.join(PASTA_RAIZ_JOGOS, "DayZ"),
+        "background": "background.png",
+        "cor": "#9900FF",
+        "cor_hover": "#5C0297",
+    },
+    {
+        "id": "Palword",
+        "nome": "PALWORD",
+        "servidor": f"{PASTA_SERVIDOR}/Palword",
+        "pasta_local": os.path.join(PASTA_RAIZ_JOGOS, "Palword"),
+        "background": "background2.png",
+        "cor": "#D95F02",
+        "cor_hover": "#9B4300",
+        "executavel": os.path.join("Pal", "Binaries", "WinGDK", "Palworld.exe"),
+    },
+]
+
+ctk.set_appearance_mode("Dark")
+
+
+# --- GERENCIAMENTO DE USUÁRIO (JSON) ---
+def obter_usuario():
+    if os.path.exists(JSON_FILE):
+        with open(JSON_FILE, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+            return dados.get("username")
+    return None
+
+def salvar_usuario(username):
+    dados = {}
+    if os.path.exists(JSON_FILE):
+        try:
+            with open(JSON_FILE, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            dados = {}
+    dados["username"] = username.strip()
+    with open(JSON_FILE, "w", encoding="utf-8") as f:
+        json.dump(dados, f, indent=4)
+
+
+def salvar_pasta_raiz_jogos(pasta):
+    dados = {}
+    if os.path.exists(JSON_FILE):
+        try:
+            with open(JSON_FILE, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            dados = {}
+    dados["pasta_jogos"] = pasta
+    with open(JSON_FILE, "w", encoding="utf-8") as f:
+        json.dump(dados, f, indent=4)
+
+
+def carregar_ftp_credenciais():
+    for cfg in (os.path.join(BASE_PATH, "ftp_config.json"), os.path.join(RESOURCE_PATH, "ftp_config.json")):
+        if os.path.exists(cfg):
+            try:
+                with open(cfg, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("username"), data.get("password")
+            except Exception:
+                continue
+    return None, None
+
+
+# --- GERENCIAMENTO DE VERSÃO ---
+def obter_versao_local(pasta_local=PASTA_LOCAL):
+    """Obtém a versão local do launcher"""
+    caminho_versao = os.path.join(pasta_local, VERSAO_LOCAL_FILE)
+    if os.path.exists(caminho_versao):
+        try:
+            with open(caminho_versao, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+                return dados.get("version", "0.0.0")
+        except Exception:
+            return "0.0.0"
+    return "0.0.0"
+
+
+def salvar_versao_local(versao, pasta_local=PASTA_LOCAL):
+    """Salva a versão local do launcher"""
+    try:
+        os.makedirs(pasta_local, exist_ok=True)
+        with open(os.path.join(pasta_local, VERSAO_LOCAL_FILE), "w", encoding="utf-8") as f:
+            json.dump({"version": versao}, f, indent=4)
+    except Exception as e:
+        print(f"Erro ao salvar versão local: {e}")
+
+
+def reiniciar_aplicativo():
+    """Reinicia o aplicativo (apenas funciona com executável)"""
+    try:
+        # Se for um executável PyInstaller
+        if getattr(sys, 'frozen', False):
+            os.execl(sys.executable, sys.executable, *sys.argv)
+        else:
+            # Se for script Python normal
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
+    except Exception as e:
+        print(f"Erro ao reiniciar: {e}")
+        messagebox.showerror("Erro", f"Não foi possível reiniciar o app: {e}")
+
+# --- EXECUÇÃO DOS JOGOS ---
+def executar_jogo(jogo, mapa=None):
+    username = obter_usuario()
+    if not username:
+        messagebox.showwarning("Aviso", "Usuário não encontrado. Faça login novamente.")
+        return
+
+    try:
+        if jogo["id"].lower() == "palword":
+            executavel = os.path.join(jogo["pasta_local"], jogo["executavel"])
+            if not os.path.isfile(executavel):
+                executaveis = [
+                    nome for nome in os.listdir(jogo["pasta_local"])
+                    if nome.lower().endswith(".exe")
+                ]
+                if len(executaveis) == 1:
+                    executavel = os.path.join(jogo["pasta_local"], executaveis[0])
+                else:
+                    raise FileNotFoundError(
+                        f"Não encontrei {jogo['executavel']} na pasta do Palworld."
+                    )
+
+            subprocess.Popen([executavel], cwd=jogo["pasta_local"])
+            return
+
+        configuracao_mapa = MAPAS_DAYZ[mapa or "Livonia"]
+        comando = [
+            os.path.join(jogo["pasta_local"], "x_64.exe"),
+            f"-mod={';'.join(os.path.join('mods', mod) for mod in configuracao_mapa['mods'].split(';'))}",
+            f"-connect={configuracao_mapa['endereco']}",
+            f"-port={configuracao_mapa['porta']}",
+            f"-name={username}"
+        ]
+        subprocess.Popen(comando, cwd=jogo["pasta_local"])
+    except Exception as e:
+        messagebox.showerror("Erro ao iniciar", f"Não foi possível iniciar {jogo['nome']}: {e}")
+
+
+# --- INTERFACE GRÁFICA PRINCIPAL ---
+class PirataZLauncher(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Launcher")
+        self.geometry("1200x648")
+        self.resizable(False, False)
+
+        self.janela_maximizada = False
+        
+        # Variável de segurança para controle de Threads de atualização
+        self.atualizando = False
+        self.jogo_atual = JOGOS[0]
+        self.jogo_pendente = None
+        self.mapa_pendente = None
+        self.frame_abas = None
+        os.makedirs(PASTA_RAIZ_JOGOS, exist_ok=True)
+
+        # Janela padrão do Windows com ícone
+        self.configurar_fundo()
+        self.configurar_icone_e_titulo()
+        self.configurar_caixa_progresso()
+
+        # 5. Controle de Fluxo de Telas
+        self.usuario_atual = obter_usuario()
+        if not pasta_raiz_jogos_configurada():
+            self.configurar_pasta_jogos(mostrar_instrucao=True)
+        self.mostrar_tela_principal()
+
+    def configurar_fundo(self, jogo=None):
+        jogo = jogo or self.jogo_atual
+        imagem_caminho = os.path.join(RESOURCE_PATH, jogo.get("background", IMAGEM_FUNDO))
+
+        if os.path.exists(imagem_caminho):
+            img_pil = Image.open(imagem_caminho)
+            self.bg_image = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(1200, 648))
+            self.bg_label = ctk.CTkLabel(self, image=self.bg_image, text="", width=1200, height=648)
+            self.bg_label.place(x=0, y=0)
+        else:
+            self.bg_label = ctk.CTkLabel(self, text="[Insira a imagem 'background.png' para ativar o visual]", 
+                                         fg_color="#111111", text_color="#ffffff", font=("Arial", 14),
+                                         width=1200, height=648)
+            self.bg_label.place(x=0, y=0)
+
+        if hasattr(self, "frame_progresso") and self.frame_progresso.winfo_exists():
+            self.frame_progresso.lift()
+
+    def configurar_icone_e_titulo(self):
+        icone_caminhos = [
+            os.path.join(RESOURCE_PATH, "assets", "pirataz.ico"),
+            os.path.join(RESOURCE_PATH, "pirataz.ico"),
+        ]
+        icone_caminho = next((caminho for caminho in icone_caminhos if os.path.exists(caminho)), None)
+        if icone_caminho:
+            try:
+                self.icone_janela = ImageTk.PhotoImage(Image.open(icone_caminho))
+                self.iconphoto(True, self.icone_janela)
+                self.iconbitmap(icone_caminho)
+                self.wm_iconbitmap(icone_caminho)
+            except Exception:
+                print(f"Não foi possível carregar o ícone: {icone_caminho}")
+
+    def atualizar_status(self, texto):
+        if hasattr(self, "lbl_status_arquivos") and self.lbl_status_arquivos.winfo_exists():
+            self.lbl_status_arquivos.configure(text=texto)
+
+    def atualizar_progresso(self, valor):
+        if hasattr(self, "barra_progresso") and self.barra_progresso.winfo_exists():
+            self.barra_progresso.set(valor)
+
+    def configurar_caixa_progresso(self):
+        self.frame_progresso = ctk.CTkFrame(
+            self, width=630, height=84, fg_color="#0D0D0D",
+            border_width=1, border_color="#FFFFFF", corner_radius=0
+        )
+        self.frame_progresso.place(x=1010, y=630, anchor="se")
+        self.frame_progresso.pack_propagate(False)
+
+        self.lbl_status_arquivos = ctk.CTkLabel(
+            self.frame_progresso, text="Clique para atualizar...",
+            font=("Lucida Console", 9), text_color="#D0D0D0", anchor="w"
+        )
+        self.lbl_status_arquivos.pack(side="top", fill="x", padx=10, pady=(7, 1))
+
+        self.barra_progresso = ctk.CTkProgressBar(
+            self.frame_progresso, width=610, height=7,
+            progress_color=self.jogo_atual["cor"], fg_color="#222222"
+        )
+        self.barra_progresso.set(0)
+        self.barra_progresso.pack(side="top", padx=10, pady=(1, 6))
+
+    def limpar_widgets_dinamicos(self):
+        for widget in self.winfo_children():
+            if widget not in [self.bg_label, self.frame_abas, self.frame_progresso]:
+                widget.destroy()
+
+    def mostrar_tooltip_pasta(self, widget):
+        self.esconder_tooltip_pasta()
+        self.tooltip_pasta = ctk.CTkLabel(
+            self,
+            text="Pasta do jogo",
+            fg_color="#151515",
+            text_color=COR_BRANCA,
+            corner_radius=4,
+            font=("Arial", 11),
+        )
+        self.posicionar_tooltip(self.tooltip_pasta, widget)
+
+    def esconder_tooltip_pasta(self):
+        if hasattr(self, "tooltip_pasta") and self.tooltip_pasta.winfo_exists():
+            self.tooltip_pasta.destroy()
+
+    def mostrar_tooltip_usuario(self, widget):
+        self.esconder_tooltip_pasta()
+        nome_usuario = obter_usuario() or "Não cadastrado"
+        self.tooltip_pasta = ctk.CTkLabel(
+            self,
+            text=f"Usuário: {nome_usuario}",
+            fg_color="#151515",
+            text_color=COR_BRANCA,
+            corner_radius=4,
+            font=("Arial", 11),
+        )
+        self.posicionar_tooltip(self.tooltip_pasta, widget)
+
+    def posicionar_tooltip(self, tooltip, widget):
+        self.update_idletasks()
+        tooltip.update_idletasks()
+        x = (
+            widget.winfo_rootx()
+            + widget.winfo_width()
+            - tooltip.winfo_reqwidth()
+            - self.winfo_rootx()
+        )
+        y = widget.winfo_rooty() + widget.winfo_height() + 4 - self.winfo_rooty()
+        tooltip.place(x=max(0, x), y=y)
+
+    def mostrar_tela_login(self):
+        if self.frame_abas is not None and self.frame_abas.winfo_exists():
+            self.frame_abas.destroy()
+            self.frame_abas = None
+        self.limpar_widgets_dinamicos()
+
+        frame_login = ctk.CTkFrame(self, width=320, height=200, corner_radius=8, fg_color="#151515", border_width=1, border_color=COR_ROXA)
+        frame_login.place(relx=0.5, rely=0.5, anchor="center")
+        frame_login.pack_propagate(False)
+
+        lbl_tit = ctk.CTkLabel(frame_login, text="Insira um nome de Sobrevivente.", font=("Arial", 16), text_color=COR_BRANCA)
+        lbl_tit.pack(pady=(25, 10))
+
+        self.ent_usuario = ctk.CTkEntry(frame_login, width=240, placeholder_text="Nome_de_Usuario (use _ - .)", justify="center")
+        self.ent_usuario.pack(pady=10)
+        self.ent_usuario.focus()
+
+        btn_entrar = ctk.CTkButton(frame_login, text="CONECTAR", fg_color=COR_ROXA, hover_color=COR_ROXA_HOVER,
+                                   text_color=COR_BRANCA, font=("Arial Black", 11), width=240, height=35, command=self.processar_login)
+        btn_entrar.pack(pady=10)
+
+    def processar_login(self):
+        nome = self.ent_usuario.get().strip()
+        if not nome:
+            messagebox.showwarning("Aviso", "Insira um nome de usuário válido.")
+            return
+
+        # Allow only letters, numbers, underscore, hyphen and dot — no spaces
+        if not re.match(r'^[A-Za-z0-9_.-]+$', nome):
+            messagebox.showwarning("Aviso", "Nome inválido. Use apenas letras, números, '_' ou '-' e '.'. Sem espaços.")
+            return
+
+        salvar_usuario(nome)
+        self.usuario_atual = nome
+        jogo_pendente = self.jogo_pendente
+        mapa_pendente = self.mapa_pendente
+        self.jogo_pendente = None
+        self.mapa_pendente = None
+        self.mostrar_tela_principal()
+        if jogo_pendente:
+            executar_jogo(jogo_pendente, mapa_pendente)
+
+    def configurar_pasta_jogos(self, mostrar_instrucao=False):
+        global PASTA_RAIZ_JOGOS
+
+        if mostrar_instrucao:
+            messagebox.showinfo(
+                "Primeiro passo",
+                "Escolha o disco para instalação dos jogos.\n\n"
+                "Clique em OK e, na próxima janela, escolha o disco "
+                "onde os jogos serão instalados.",
+                parent=self,
+            )
+
+        pasta = filedialog.askdirectory(
+            parent=self,
+            title="Escolha a pasta onde os jogos serão instalados",
+            initialdir=PASTA_RAIZ_JOGOS if os.path.isdir(PASTA_RAIZ_JOGOS) else os.path.expanduser("~"),
+        )
+        if not pasta:
+            return
+
+        pasta = os.path.join(os.path.abspath(pasta), "pirataz")
+
+        confirmar = messagebox.askyesno(
+            "Alterar pasta dos jogos",
+            f"Os jogos serão instalados em:\n\n{pasta}\n\nDeseja continuar?",
+            parent=self,
+        )
+        if not confirmar:
+            return
+
+        PASTA_RAIZ_JOGOS = pasta
+        os.makedirs(PASTA_RAIZ_JOGOS, exist_ok=True)
+        salvar_pasta_raiz_jogos(pasta)
+        for jogo in JOGOS:
+            nome_pasta = "DayZ" if jogo["id"] == "dayz" else "Palword"
+            jogo["pasta_local"] = os.path.join(PASTA_RAIZ_JOGOS, nome_pasta)
+            os.makedirs(jogo["pasta_local"], exist_ok=True)
+
+        messagebox.showinfo(
+            "Pasta configurada",
+            "A nova pasta foi salva. Os jogos serão instalados e iniciados nesse local.",
+            parent=self,
+        )
+        self.mostrar_tela_principal()
+        return True
+
+    def iniciar_jogo(self, mapa=None):
+        if not obter_usuario():
+            self.jogo_pendente = self.jogo_atual
+            self.mapa_pendente = mapa
+            self.mostrar_tela_login()
+            return
+        executar_jogo(self.jogo_atual, mapa)
+
+    def mostrar_menu_mapas(self):
+        if hasattr(self, "menu_mapas") and self.menu_mapas.winfo_exists():
+            self.menu_mapas.destroy()
+            return
+
+        largura_menu = 157
+        altura_menu = 126
+        self.menu_mapas = ctk.CTkFrame(
+            self, width=largura_menu, height=altura_menu,
+            fg_color="#171717", border_width=1, border_color="#777777", corner_radius=0
+        )
+        self.menu_mapas.pack_propagate(False)
+
+        for mapa in ("Livonia", "Sakhal", "Nasdara"):
+            opcao = ctk.CTkButton(
+                self.menu_mapas, text=mapa, fg_color="#777777", hover_color=COR_ROXA,
+                text_color=COR_BRANCA, font=("Hanalei Fill", 17), width=137, height=30,
+                corner_radius=0, command=lambda item=mapa: self.selecionar_mapa(item)
+            )
+            opcao.pack(padx=10, pady=5)
+
+        self.update_idletasks()
+        botao_x = self.btn_iniciar.winfo_rootx() - self.winfo_rootx()
+        botao_y = self.btn_iniciar.winfo_rooty() - self.winfo_rooty()
+        pos_x = botao_x + (self.btn_iniciar.winfo_width() - largura_menu) // 2
+        pos_y = botao_y - altura_menu - 6
+        self.menu_mapas.place(x=pos_x, y=pos_y)
+        self.menu_mapas.lift()
+
+    def selecionar_mapa(self, mapa):
+        self.mapa_selecionado = mapa
+        if hasattr(self, "menu_mapas") and self.menu_mapas.winfo_exists():
+            self.menu_mapas.destroy()
+        self.iniciar_jogo(mapa)
+
+    def mostrar_tela_principal(self):
+        self.limpar_widgets_dinamicos()
+        if self.frame_abas is not None and self.frame_abas.winfo_exists():
+            self.frame_abas.destroy()
+
+        self.frame_abas = ctk.CTkFrame(self, width=520, height=40, fg_color="transparent", corner_radius=0)
+        self.frame_abas.place(relx=0.5, y=12, anchor="n")
+        for jogo in JOGOS:
+            aba = ctk.CTkButton(
+                self.frame_abas,
+                text=jogo["nome"],
+                fg_color=jogo["cor"] if jogo is self.jogo_atual else "#141414",
+                hover_color=jogo["cor_hover"],
+                text_color="#F8F4F4" if jogo is not self.jogo_atual else COR_BRANCA,
+                font=("Hanalei Fill", 16),
+                width=150,
+                height=32,
+                corner_radius=0,
+                command=lambda item=jogo: self.selecionar_jogo(item),
+            )
+            aba.pack(side="left", padx=2, pady=4)
+
+        btn_configuracoes = ctk.CTkButton(
+            self,
+            text="⚙",
+            fg_color="transparent",
+            hover_color="#FF0000",
+            text_color=COR_BRANCA,
+            font=("Segoe UI Symbol", 25),
+            width=38,
+            height=38,
+            corner_radius=0,
+            command=self.configurar_pasta_jogos,
+        )
+        btn_configuracoes.place(relx=0.98, y=14.2, anchor="ne")
+        btn_configuracoes.bind(
+            "<Enter>", lambda event: self.mostrar_tooltip_pasta(btn_configuracoes)
+        )
+        btn_configuracoes.bind(
+            "<Leave>", lambda event: self.esconder_tooltip_pasta()
+        )
+
+        btn_trocar = ctk.CTkButton(
+            self, text="USUÁRIO", fg_color="transparent",
+            hover_color="#FF0000", text_color=COR_BRANCA, font=("Hanalei Fill", 25),
+            width=90, height=28, corner_radius=1, command=self.mostrar_tela_login
+        )
+        btn_trocar.place(relx=0.944, y=15, anchor="ne")
+        btn_trocar.bind(
+            "<Enter>", lambda event: self.mostrar_tooltip_usuario(btn_trocar)
+        )
+        btn_trocar.bind(
+            "<Leave>", lambda event: self.esconder_tooltip_pasta()
+        )
+
+        self.frame_apps = ctk.CTkFrame(self, width=210, height=72, fg_color="#111111", border_color=self.jogo_atual["cor"], corner_radius=0)
+        self.frame_apps.place(x=20, y=620, anchor="sw")
+
+        btn_iniciar = ctk.CTkButton(
+            self.frame_apps, text=f"JOGAR {self.jogo_atual['nome']}", fg_color=self.jogo_atual["cor"],
+            hover_color=self.jogo_atual["cor_hover"], text_color=COR_BRANCA,
+            font=("Holtwood One SC", 16), width=185, height=42, corner_radius=0,
+            command=(
+                self.mostrar_menu_mapas
+                if self.jogo_atual["id"].lower() == "dayz"
+                else self.iniciar_jogo
+            ), state="normal"
+        )
+        self.btn_iniciar = btn_iniciar
+        btn_iniciar.pack(side="top", pady=12, padx=12)
+
+        if hasattr(self, "btn_forcar") and self.btn_forcar.winfo_exists():
+            self.btn_forcar.destroy()
+        self.btn_forcar = ctk.CTkButton(
+            self.frame_progresso, text=f"ATUALIZAR {self.jogo_atual['nome']}",
+            fg_color="transparent", border_width=1,
+            border_color=self.jogo_atual["cor"], hover_color=self.jogo_atual["cor_hover"],
+            text_color=COR_BRANCA, font=("Holtwood One SC", 16),
+            width=150, height=20, corner_radius=0,
+            command=self.clicou_forcar_atualizacao
+        )
+        self.btn_forcar.pack(side="bottom", pady=(0, 5))
+        self.barra_progresso.configure(progress_color=self.jogo_atual["cor"])
+        self.gerenciar_estado_botao_update()
+
+    def selecionar_jogo(self, jogo):
+        if self.atualizando:
+            messagebox.showwarning("Atualização em andamento", "Aguarde a atualização atual terminar antes de trocar de jogo.")
+            return
+
+        self.jogo_atual = jogo
+        os.makedirs(jogo["pasta_local"], exist_ok=True)
+        self.bg_label.destroy()
+        self.configurar_fundo(jogo)
+        self.mostrar_tela_principal()
+
+    def clicou_forcar_atualizacao(self):
+        if self.atualizando:
+            messagebox.showwarning("Aviso", "Já existe uma checagem ou atualização em andamento.")
+            return
+
+        threading.Thread(
+            target=self.verificar_e_atualizar_incremental,
+            kwargs={"jogo": self.jogo_atual},
+            daemon=True
+        ).start()
+
+    def gerenciar_estado_botao_update(self):
+        if hasattr(self, "btn_forcar") and self.btn_forcar.winfo_exists():
+            if self.atualizando:
+                self.btn_forcar.configure(
+                    state="disabled", text=f"ATUALIZANDO {self.jogo_atual['nome']}..."
+                )
+            else:
+                self.btn_forcar.configure(
+                    state="normal", text=f"ATUALIZAR {self.jogo_atual['nome']}"
+                )
+
+    def listar_arquivos_locais_obsoletos(self, arquivos_servidor_relativos, pasta_local):
+        arquivos_ignorados_local = {
+            os.path.normcase(os.path.normpath(JSON_FILE)),
+            os.path.normcase(os.path.normpath(IMAGEM_FUNDO)),
+            os.path.normcase(os.path.normpath(os.path.basename(sys.executable))),
+            os.path.normcase(os.path.normpath("ftp_config.json")),
+            os.path.normcase(os.path.normpath("pirataz.ico")),
+            os.path.normcase(os.path.normpath("launcher_version.json")),
+            os.path.normcase(os.path.normpath(os.path.basename(__file__)))
+        }
+        arquivos_obsoletos = []
+
+        for raiz, _, arquivos in os.walk(pasta_local):
+            for arquivo in arquivos:
+                caminho_local = os.path.join(raiz, arquivo)
+                caminho_relativo_local = os.path.normcase(os.path.normpath(os.path.relpath(caminho_local, pasta_local)))
+
+                if caminho_relativo_local in arquivos_servidor_relativos:
+                    continue
+                if caminho_relativo_local in arquivos_ignorados_local:
+                    continue
+
+                arquivos_obsoletos.append((caminho_relativo_local, caminho_local))
+
+        return arquivos_obsoletos
+
+    def remover_arquivos_locais_obsoletos(self, arquivos_servidor_relativos, pasta_local):
+        arquivos_locais_removidos = 0
+        for _, caminho_local in self.listar_arquivos_locais_obsoletos(arquivos_servidor_relativos, pasta_local):
+            try:
+                os.remove(caminho_local)
+                arquivos_locais_removidos += 1
+            except Exception as err:
+                print(f"Falha ao remover {caminho_local}: {err}")
+                traceback.print_exc()
+
+        # Também remove pastas vazias que sobraram após deletar arquivos obsoletos.
+        for raiz, diretorios, arquivos in os.walk(pasta_local, topdown=False):
+            for diretorio in diretorios:
+                caminho_dir = os.path.join(raiz, diretorio)
+                try:
+                    if not os.listdir(caminho_dir):
+                        os.rmdir(caminho_dir)
+                except Exception as err:
+                    print(f"Falha ao remover pasta {caminho_dir}: {err}")
+                    traceback.print_exc()
+
+        return arquivos_locais_removidos
+
+    # --- ATUALIZADOR DIFERENCIAL + FORÇADO (RODANDO EM THREAD) ---
+    def verificar_e_atualizar_incremental(self, forcar=False, baixar=True, jogo=None, somente_faltantes=False):
+        if self.atualizando and not forcar:
+            return
+
+        jogo = jogo or self.jogo_atual
+        pasta_servidor = jogo["servidor"]
+        pasta_local = jogo["pasta_local"]
+        os.makedirs(pasta_local, exist_ok=True)
+        self.atualizando = True
+        if hasattr(self, "btn_iniciar") and self.btn_iniciar.winfo_exists():
+            self.btn_iniciar.configure(state="disabled")
+        self.gerenciar_estado_botao_update()
+
+        try:
+            arquivos_servidor_relativos = set()
+            mudancas = []
+            operacoes_locais = []
+            arquivos_obsoletos = []
+            # Suporte a PASTA_SERVIDOR local ou via FTP (ftp://...)
+            if pasta_servidor.startswith("ftp://"):
+                if forcar:
+                    self.atualizar_status("Forçando verificação completa de arquivos...")
+                else:
+                    self.atualizar_status("Verificando arquivos modificados...")
+
+                user, pwd = carregar_ftp_credenciais()
+
+                def _progress(processed, total, relpath):
+                    try:
+                        self.atualizar_status(f"Checando: {relpath}")
+                        if total:
+                            self.atualizar_progresso(processed / total)
+                    except Exception:
+                        pass
+
+                resultado = ftp_client.download_tree(
+                    pasta_servidor,
+                    pasta_local,
+                    username=user,
+                    password=pwd,
+                    forcar=forcar,
+                    somente_faltantes=False,
+                    progress_callback=_progress,
+                    baixar=False,
+                )
+                total_arquivos = resultado.get("total", 0)
+                mudancas = resultado.get("changes", [])
+                arquivos_servidor_relativos = resultado.get("server_files", set())
+
+            else:
+                if not os.path.exists(pasta_servidor):
+                    self.atualizar_status("[Servidor Offline] Iniciando em modo Local.")
+                    self.atualizar_progresso(1.0)
+                    return
+
+                if forcar:
+                    self.atualizar_status("Forçando verificação completa de arquivos...")
+                else:
+                    self.atualizar_status("Verificando arquivos modificados...")
+                
+                lista_arquivos_servidor = []
+                arquivos_servidor_relativos = set()
+                for raiz, _, arquivos in os.walk(pasta_servidor):
+                    for arquivo in arquivos:
+                        caminho_servidor = os.path.join(raiz, arquivo)
+                        caminho_relativo_servidor = os.path.normcase(os.path.normpath(os.path.relpath(caminho_servidor, pasta_servidor)))
+                        lista_arquivos_servidor.append(caminho_servidor)
+                        arquivos_servidor_relativos.add(caminho_relativo_servidor)
+                
+                total_arquivos = len(lista_arquivos_servidor)
+
+                for caminho_servidor in lista_arquivos_servidor:
+                    caminho_relativo = os.path.relpath(caminho_servidor, pasta_servidor)
+                    caminho_local = os.path.join(pasta_local, caminho_relativo)
+
+                    self.atualizar_status(f"Checando: {caminho_relativo}")
+
+                    arquivo_faltante = not os.path.exists(caminho_local)
+                    servidor_mtime = os.path.getmtime(caminho_servidor)
+                    servidor_tamanho = os.path.getsize(caminho_servidor)
+                    deve_baixar = arquivo_faltante or (
+                        os.path.getmtime(caminho_local) != servidor_mtime
+                        or os.path.getsize(caminho_local) != servidor_tamanho
+                    ) if not arquivo_faltante else True
+                    if deve_baixar:
+                        mudanca = {
+                            "action": "add" if arquivo_faltante else "update",
+                            "path": caminho_relativo,
+                            "size": servidor_tamanho,
+                            "mtime": servidor_mtime,
+                        }
+                        mudancas.append(mudanca)
+                        operacoes_locais.append((caminho_servidor, caminho_local, mudanca))
+
+                    if total_arquivos:
+                        self.atualizar_progresso(
+                            (lista_arquivos_servidor.index(caminho_servidor) + 1) / total_arquivos
+                        )
+
+            arquivos_obsoletos = self.listar_arquivos_locais_obsoletos(
+                arquivos_servidor_relativos, pasta_local
+            )
+            arquivos_atualizados = 0
+            arquivos_locais_removidos = 0
+
+            if not mudancas and not arquivos_obsoletos:
+                self.atualizar_status("Jogo está na versão mais recente.")
+                self.atualizar_progresso(1.0)
+                if forcar:
+                    messagebox.showinfo("Informação", "Sua instalação já está 100% idêntica ao servidor de arquivos.")
+                return
+
+            if not baixar:
+                self.atualizar_status("Atualização cancelada.")
+                return
+
+            if pasta_servidor.startswith("ftp://"):
+                resultado_aplicacao = ftp_client.download_tree(
+                    pasta_servidor,
+                    pasta_local,
+                    username=user,
+                    password=pwd,
+                    forcar=forcar,
+                    progress_callback=_progress,
+                    baixar=True,
+                )
+                arquivos_atualizados = resultado_aplicacao.get("updated", 0)
+            else:
+                for caminho_servidor, caminho_local, mudanca in operacoes_locais:
+                    self.atualizar_status(f"Atualizando: {mudanca['path']}")
+                    os.makedirs(os.path.dirname(caminho_local), exist_ok=True)
+                    shutil.copy2(caminho_servidor, caminho_local)
+                    arquivos_atualizados += 1
+                    time.sleep(0.04)
+
+            arquivos_locais_removidos = self.remover_arquivos_locais_obsoletos(
+                arquivos_servidor_relativos, pasta_local
+            )
+
+            # --- VERIFICAÇÃO E ATUALIZAÇÃO DE VERSÃO ---
+            versao_nova = None
+            changelog = ""
+            
+            if pasta_servidor.startswith("ftp://"):
+                # Tentar obter versão do servidor via FTP
+                try:
+                    versao_nova = ftp_client.obter_versao_remota(pasta_servidor, VERSAO_SERVIDOR_FILE, username=user, password=pwd)
+                except Exception:
+                    versao_nova = None
+            else:
+                # Tentar obter versão do servidor local
+                caminho_versao_servidor = os.path.join(pasta_servidor, VERSAO_SERVIDOR_FILE)
+                if os.path.exists(caminho_versao_servidor):
+                    try:
+                        with open(caminho_versao_servidor, "r", encoding="utf-8") as f:
+                            dados = json.load(f)
+                            versao_nova = dados.get("version")
+                            changelog = dados.get("changelog", "")
+                    except Exception:
+                        versao_nova = None
+
+            versao_local = obter_versao_local(pasta_local)
+            requer_restart = False
+
+            if versao_nova and versao_nova != versao_local:
+                # Nova versão detectada
+                salvar_versao_local(versao_nova, pasta_local)
+                requer_restart = True
+                if changelog:
+                    mensagem_changelog = f"\n\n📋 Changelog:\n{changelog}"
+                else:
+                    mensagem_changelog = ""
+
+            if arquivos_atualizados > 0 or arquivos_locais_removidos > 0:
+                mensagem = []
+                if arquivos_atualizados > 0:
+                    mensagem.append(f"{arquivos_atualizados} arquivo(s) sincronizado(s)")
+                if arquivos_locais_removidos > 0:
+                    mensagem.append(f"{arquivos_locais_removidos} arquivo(s) locais removido(s)")
+                self.atualizar_status(" / ".join(mensagem) + ".")
+                
+                if requer_restart:
+                    mensagem_box = f"✅ Atualização instalada com sucesso!\n\nVersão anterior: {versao_local}\nVersão nova: {versao_nova}\n" + "\n".join(mensagem) + mensagem_changelog + "\n\nO aplicativo será reiniciado em 5 segundos..."
+                    messagebox.showinfo("Atualização Concluída", mensagem_box)
+                    # Aguarda 5 segundos e reinicia
+                    threading.Timer(5.0, reiniciar_aplicativo).start()
+                elif forcar:
+                    messagebox.showinfo("Sucesso", f"Atualização forçada concluída!\n" + "\n".join(mensagem))
+            else:
+                self.atualizar_status("Jogo está na versão mais recente.")
+                if forcar:
+                    messagebox.showinfo("Informação", "Sua instalação já está 100% idêntica ao servidor de arquivos.")
+
+        except Exception as e:
+            self.atualizar_status(f"Erro FTP: {str(e)[:100]}")
+            print(f"Erro na sincronização: {e}")
+            traceback.print_exc()
+        finally:
+            if hasattr(self, "btn_iniciar") and self.btn_iniciar.winfo_exists():
+                self.btn_iniciar.configure(state="normal")
+            self.atualizando = False
+            self.gerenciar_estado_botao_update()
+
+
+if __name__ == "__main__":
+    app = PirataZLauncher()
+    app.mainloop()
