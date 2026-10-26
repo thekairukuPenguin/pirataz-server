@@ -9,7 +9,7 @@ import customtkinter as ctk
 import sys
 import re
 from tkinter import filedialog, messagebox
-from PIL import Image, ImageTk
+from PIL import Image
 import ftp_client
 
 # --- CONFIGURAÇÕES DE ESTILO ---
@@ -25,7 +25,9 @@ RESOURCE_PATH = getattr(sys, "_MEIPASS", BASE_PATH)
 # Caminho do Servidor Local/Nuvem para Atualização
 PASTA_SERVIDOR = r""  # caminho do servidor de arquivos
 PASTA_LOCAL = BASE_PATH
-PASTA_RAIZ_JOGOS_PADRAO = r""
+PASTA_RAIZ_JOGOS_PADRAO = os.path.join(
+    os.path.expanduser("~"), "Games", "GameLauncher"
+)
 VERSAO_LOCAL_FILE = "launcher_version.json"  # Arquivo de versão local
 VERSAO_SERVIDOR_FILE = "version.json"  # Nome do arquivo de versão no servidor
 
@@ -76,7 +78,7 @@ JOGOS = [
     {
         "id": "dayz",
         "nome": "DAYZ",
-        "servidor": f"{PASTA_SERVIDOR}/DayZ",
+        "servidor": f"{PASTA_SERVIDOR.rstrip('/')}/DayZ" if PASTA_SERVIDOR else "",
         "pasta_local": os.path.join(PASTA_RAIZ_JOGOS, "DayZ"),
         "background": "background.png",
         "cor": "#9900FF",
@@ -85,7 +87,7 @@ JOGOS = [
     {
         "id": "Palword",
         "nome": "PALWORD",
-        "servidor": f"{PASTA_SERVIDOR}/Palword",
+        "servidor": f"{PASTA_SERVIDOR.rstrip('/')}/Palword" if PASTA_SERVIDOR else "",
         "pasta_local": os.path.join(PASTA_RAIZ_JOGOS, "Palword"),
         "background": "background2.png",
         "cor": "#D95F02",
@@ -220,7 +222,7 @@ def executar_jogo(jogo, mapa=None):
 
 
 # --- INTERFACE GRÁFICA PRINCIPAL ---
-class PirataZLauncher(ctk.CTk):
+class LauncherApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Launcher")
@@ -237,9 +239,8 @@ class PirataZLauncher(ctk.CTk):
         self.frame_abas = None
         os.makedirs(PASTA_RAIZ_JOGOS, exist_ok=True)
 
-        # Janela padrão do Windows com ícone
+        # Janela padrão do Windows
         self.configurar_fundo()
-        self.configurar_icone_e_titulo()
         self.configurar_caixa_progresso()
 
         # 5. Controle de Fluxo de Telas
@@ -265,21 +266,6 @@ class PirataZLauncher(ctk.CTk):
 
         if hasattr(self, "frame_progresso") and self.frame_progresso.winfo_exists():
             self.frame_progresso.lift()
-
-    def configurar_icone_e_titulo(self):
-        icone_caminhos = [
-            os.path.join(RESOURCE_PATH, "assets", "pirataz.ico"),
-            os.path.join(RESOURCE_PATH, "pirataz.ico"),
-        ]
-        icone_caminho = next((caminho for caminho in icone_caminhos if os.path.exists(caminho)), None)
-        if icone_caminho:
-            try:
-                self.icone_janela = ImageTk.PhotoImage(Image.open(icone_caminho))
-                self.iconphoto(True, self.icone_janela)
-                self.iconbitmap(icone_caminho)
-                self.wm_iconbitmap(icone_caminho)
-            except Exception:
-                print(f"Não foi possível carregar o ícone: {icone_caminho}")
 
     def atualizar_status(self, texto):
         if hasattr(self, "lbl_status_arquivos") and self.lbl_status_arquivos.winfo_exists():
@@ -860,5 +846,5 @@ class PirataZLauncher(ctk.CTk):
 
 
 if __name__ == "__main__":
-    app = PirataZLauncher()
+    app = LauncherApp()
     app.mainloop()
